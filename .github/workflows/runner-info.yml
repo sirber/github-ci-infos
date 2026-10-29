@@ -1,0 +1,98 @@
+name: Ubuntu runner specs
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  inspect:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04]
+
+    steps:
+      - name: Report hardware and disk usage
+        shell: bash
+        env:
+          RUNNER_LABEL: ${{ matrix.os }}
+        run: |
+          report="$RUNNER_TEMP/runner-info.txt"
+          directory_sizes="$RUNNER_TEMP/directory-sizes.txt"
+
+          {
+            echo '=== Runner image ==='
+            echo "Label: $RUNNER_LABEL"
+            echo "Image: ${ImageOS:-unknown}"
+            echo "Image version: ${ImageVersion:-unknown}"
+            date -u
+            cat /etc/os-release
+            uname -a
+
+            echo
+            echo '=== CPU ==='
+            lscpu
+            echo "Available processors: $(nproc)"
+
+            echo
+            echo '=== RAM and swap ==='
+            free -h
+
+            echo
+            echo '=== Disks and mounts ==='
+            lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS
+            df -hT
+            df -ih
+
+            echo
+            echo '=== Largest directories on the root filesystem (depth <= 4) ==='
+            # Scan once. Stay on the root filesystem and skip virtual mounts.
+            # Directory sizes include their children, so rows overlap.
+            sudo du -x --block-size=1 --max-depth=4 / > "$directory_sizes" \
+              || echo 'Some directories changed or could not be read during the scan.'
+            sort -nr "$directory_sizes" | sed -n '1,50p' | numfmt --field=1 --to=iec
+
+            echo
+            echo '=== Common preinstalled tool directories ==='
+            for directory in \
+              /usr/local/lib/android \
+              /usr/share/dotnet \
+              /usr/local/.ghcup \
+              /opt/ghc \
+              /usr/share/swift \
+              /usr/local/share/powershell \
+              /opt/hostedtoolcache \
+              /opt/az \
+              /var/lib/docker \
+              /var/lib/containerd; do
+              if [ -d "$directory" ]; then
+                sudo du -sh "$directory" || echo "Could not fully read $directory"
+              fi
+            done
+
+            echo
+            echo '=== Largest files over 500 MiB in tool and data directories ==='
+            sudo find /usr /opt /var /home -xdev -type f -size +500M \
+              -printf '%s\t%p\n' \
+              | sort -nr | sed -n '1,30p' | numfmt --field=1 --to=iec \
+              || echo 'Some files changed or could not be read during the scan.'
+
+            echo
+            echo '=== Docker images, containers, and build cache ==='
+            docker system df
+          } 2>&1 | tee "$report"
+
+          {
+            echo "## $RUNNER_LABEL"
+            echo
+            echo 'Read-only snapshot before any project build or cleanup.'
+            echo 'Directory totals include their children and must not be added together.'
+            echo
+            echo '```text'
+            cat "$report"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
